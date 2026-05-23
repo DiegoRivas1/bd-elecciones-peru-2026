@@ -183,10 +183,10 @@ La conexión al master queda guardada con el nombre `aws-onpe` y se accede desde
 }
 ```
 
-> **Cuando cambia la IP:** Ve a **Settings → Connections → aws-onpe** y actualiza solo la dirección IP. El nombre de la conexión, el widget del sidebar y todos los terminales abiertos siguen funcionando igual no se reconfigura nada más.
+> **Cuando cambia la IP:** Ve a **C:\Users\USER\.ssh\config** y actualiza solo la dirección IP. El nombre de la conexión, el widget del sidebar y todos los terminales abiertos siguen funcionando igual no se reconfigura nada más.
 
 ### 3. Configurar /etc/hosts en los 4 nodos
-
+Se deben reemplazar con las ips privadas de cada nodo (no las públicas) para que Hadoop pueda resolver los nombres internamente.
 ```bash
 sudo tee -a /etc/hosts << 'EOF'
 172.31.39.250 hadoop-master
@@ -230,11 +230,32 @@ cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 ```
 
+Saldra algo como:
+
+```bash
+ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3... usuario@hadoop-master
+```
+
 En cada **worker** (pegar la clave pública del master):
 
 ```bash
 echo "<clave-publica-del-master>" >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
+```
+
+La clave publica se colocaria asi:
+```bash
+echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3... usuario@hadoop-master
+" >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+```
+
+Se usa de la forma:
+
+```bash
+ssh ec2-user@hadoop-worker1
+ssh ec2-user@hadoop-worker2
+ssh ec2-user@hadoop-worker3
 ```
 
 Verificar desde el master:
