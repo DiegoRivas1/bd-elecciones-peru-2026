@@ -410,6 +410,83 @@ python3 scripts/ingesta/onpe_ingesta.py 1000 5000
 wc -l votos_final.csv
 tail ingesta_final.log
 ```
+> **Mejora recomendada:** El script `onpe_ingesta.py` incluye reintentos automáticos (3 intentos con 2 segundos de espera) para mesas que no respondan. Antes de lanzar la descarga paralela, copia el script actualizado a los workers con el comando del Paso 1.
+
+### Descarga paralela con los 3 workers
+
+Para reducir el tiempo de descarga de ~1.5 horas a ~30 minutos, se puede distribuir la ingesta entre los 3 workers:
+
+**Paso 1 Copiar el script a los workers:**
+```bash
+for worker in hadoop-worker1 hadoop-worker2 hadoop-worker3; do
+  scp /home/ec2-user/onpe_ingesta.py ec2-user@$worker:/home/ec2-user/
+  echo "$worker listo"
+done
+```
+
+**Paso 2 Lanzar en paralelo desde el master:**
+```bash
+ssh ec2-user@hadoop-worker1 "nohup python3 /home/ec2-user/onpe_ingesta.py 1 30922 > /home/ec2-user/ingesta1.log 2>&1 &"
+ssh ec2-user@hadoop-worker2 "nohup python3 /home/ec2-user/onpe_ingesta.py 30923 61844 > /home/ec2-user/ingesta2.log 2>&1 &"
+ssh ec2-user@hadoop-worker3 "nohup python3 /home/ec2-user/onpe_ingesta.py 61845 92766 > /home/ec2-user/ingesta3.log 2>&1 &"
+echo "Los 3 workers descargando en paralelo"
+```
+
+**Paso 3 Monitorear progreso:**
+```bash
+echo "Worker1:"; ssh ec2-user@hadoop-worker1 "wc -l /home/ec2-user/votos_final.csv"
+echo "Worker2:"; ssh ec2-user@hadoop-worker2 "wc -l /home/ec2-user/votos_final.csv"
+echo "Worker3:"; ssh ec2-user@hadoop-worker3 "wc -l /home/ec2-user/votos_final.csv"
+```
+
+**Paso 4 Juntar los 3 CSV en el master:**
+```bash
+mkdir -p /home/ec2-user/votos
+mkdir -p /home/ec2-user/votos_completos
+scp ec2-user@hadoop-worker1:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos1.csv
+scp ec2-user@hadoop-worker2:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos2.csv
+scp ec2-user@hadoop-worker3:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos3.csv
+
+head -1 /home/ec2-user/votos/votos1.csv > /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos1.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos2.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos3.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+wc -l /home/ec2-user/votos/votos_completo.csv
+```
+
+**Paso 5 Subir a HDFS y procesar con MapReduce:**
+Subir archivo por archivo
+```bash
+hdfs dfs -mkdir -p /onpe/input_paralelo
+#Podemos subir los 3 archivos por separado o el archivo completo, ambos funcionan igual porque MapReduce procesa todos los archivos de la carpeta automáticamente
+hdfs dfs -put /home/ec2-user/votos/votos1.csv /onpe/input_paralelo/
+hdfs dfs -put /home/ec2-user/votos/votos2.csv /onpe/input_paralelo/
+hdfs dfs -put /home/ec2-user/votos/votos3.csv /onpe/input_paralelo/
+# MapReduce procesa todos los archivos de la carpeta automáticamente
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper.py,reducer.py \
+  -mapper "python3 mapper.py" \
+  -reducer "python3 reducer.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_nacional_paralelo
+```
+
+O subir el archivo junto de golpe
+
+```bash
+hdfs dfs -mkdir -p /onpe/input_paralelo
+# O podemos usar el archivo completo
+hdfs dfs -put /home/ec2-user/votos/votos_completos/votos_completo.csv /onpe/input_paralelo/
+# MapReduce procesa todos los archivos de la carpeta automáticamente
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper.py,reducer.py \
+  -mapper "python3 mapper.py" \
+  -reducer "python3 reducer.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_nacional_paralelo
+```
+
+> **Nota:** El script incluye reintentos automáticos — si una mesa no responde, espera 2 segundos y reintenta hasta 3 veces antes de saltarla.
 
 ### `scripts/consultas/ver_mesa.py`
 
@@ -693,6 +770,8 @@ python3 scripts/consultas/consulta_region.py distrito 120201
 
 ## 🌐 Dashboard Web
 
+
+
 ### Instalación
 
 ```bash
@@ -701,19 +780,20 @@ pip3 install flask
 
 ### Ejecución
 
+
 ```bash
-# En el master
+# Iniciar con datos finales (default)
 nohup python3 dashboard/dashboard.py > dashboard.log 2>&1 &
+
+# Iniciar con datos específicos
+nohup python3 dashboard/dashboard.py /onpe/output_nacional_paralelo /onpe/output_region_paralelo > dashboard.log 2>&1 &
 
 # Verificar que corre
 tail dashboard.log
 # * Running on http://0.0.0.0:5000
 
-# Reiniciar dashboard
+# Detener
 kill $(ps aux | grep dashboard.py | grep -v grep | awk '{print $2}')
-nohup python3 dashboard/dashboard.py > dashboard.log 2>&1 &
-echo "PID: $!"
-
 ```
 
 Acceder en: `http://<IP-PUBLICA-MASTER>:5000`
@@ -835,6 +915,27 @@ python3 scripts/consultas/ver_mesa.py 007172
 
 # Descargar datos frescos
 nohup python3 scripts/ingesta/onpe_ingesta.py 1 92766 > ingesta.log 2>&1 &
+
+# Consultar por región con carpeta específica
+python3 scripts/consultas/consulta_region.py departamento 04 /onpe/output_region_paralelo
+python3 scripts/consultas/consulta_region.py provincia 0401 /onpe/output_region_paralelo
+python3 scripts/consultas/consulta_region.py distrito 040127 /onpe/output_region_paralelo
+
+# Correr jobs con datos paralelos
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper.py,reducer.py \
+  -mapper "python3 mapper.py" \
+  -reducer "python3 reducer.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_nacional_paralelo
+
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper_region.py,reducer_region.py \
+  -mapper "python3 mapper_region.py" \
+  -reducer "python3 reducer_region.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_region_paralelo
+
 ```
 
 ---
