@@ -603,8 +603,11 @@ hdfs dfs -cat /output/part-r-00000
 
 ![WordCount](screenshots/08_wordcount_prueba.png)
 
-### Subir datos a HDFS
+---
 
+### Opción A — Descarga simple (1 nodo master)
+
+**Subir datos a HDFS:**
 ```bash
 hdfs dfs -mkdir -p /onpe/input_final
 hdfs dfs -put votos_final.csv /onpe/input_final/
@@ -612,10 +615,10 @@ hdfs dfs -ls -h /onpe/input_final/
 # 255.0 M  /onpe/input_final/votos_final.csv
 ```
 
-### Job 1 Resultados Nacionales
+**Job 1 — Resultados Nacionales:**
 
-**`scripts/mapreduce/mapper.py`** emite `partido \t votos` por cada fila  
-**`scripts/mapreduce/reducer.py`** agrupa por partido y suma votos
+`scripts/mapreduce/mapper.py` emite `partido \t votos` por cada fila  
+`scripts/mapreduce/reducer.py` agrupa por partido y suma votos
 
 ```bash
 hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
@@ -626,10 +629,10 @@ hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
   -output /onpe/output_nacional_final
 ```
 
-### Job 2 Resultados por Región
+**Job 2 — Resultados por Región:**
 
-**`scripts/mapreduce/mapper_region.py`** emite `ubigeo|||partido \t votos`  
-**`scripts/mapreduce/reducer_region.py`** agrupa por clave compuesta y suma
+`scripts/mapreduce/mapper_region.py` emite `ubigeo|||partido \t votos`  
+`scripts/mapreduce/reducer_region.py` agrupa por clave compuesta y suma
 
 ```bash
 hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
@@ -640,7 +643,86 @@ hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
   -output /onpe/output_region_final
 ```
 
-> **Nota técnica:** La clave compuesta `ubigeo|||partido` fue necesaria porque Hadoop distribuye el procesamiento entre workers. Con solo `ubigeo` como clave, el sort no garantizaba que todos los registros de un mismo `ubigeo+partido` llegaran al mismo reducer, generando duplicados en los resultados.
+> **Nota técnica:** La clave compuesta `ubigeo|||partido` fue necesaria porque Hadoop distribuye el procesamiento entre workers. Con solo `ubigeo` como clave, el sort no garantizaba que todos los registros de un mismo `ubigeo+partido` llegaran al mismo reducer, generando duplicados.
+
+---
+
+### Opción B — Descarga paralela (3 workers, ~30 min)
+
+Para reducir el tiempo de descarga de ~1.5 horas a ~30 minutos, se distribuye la ingesta entre los 3 workers y luego se procesan los datos juntos con MapReduce.
+
+**Paso 1 — Copiar el script a los workers:**
+```bash
+for worker in hadoop-worker1 hadoop-worker2 hadoop-worker3; do
+  scp /home/ec2-user/onpe_ingesta.py ec2-user@$worker:/home/ec2-user/
+  echo "$worker listo"
+done
+```
+
+**Paso 2 — Lanzar en paralelo desde el master:**
+```bash
+ssh ec2-user@hadoop-worker1 "nohup python3 /home/ec2-user/onpe_ingesta.py 1 30922 > /home/ec2-user/ingesta1.log 2>&1 &"
+ssh ec2-user@hadoop-worker2 "nohup python3 /home/ec2-user/onpe_ingesta.py 30923 61844 > /home/ec2-user/ingesta2.log 2>&1 &"
+ssh ec2-user@hadoop-worker3 "nohup python3 /home/ec2-user/onpe_ingesta.py 61845 92766 > /home/ec2-user/ingesta3.log 2>&1 &"
+echo "Los 3 workers descargando en paralelo"
+```
+
+**Paso 3 — Monitorear progreso:**
+```bash
+echo "Worker1:"; ssh ec2-user@hadoop-worker1 "wc -l /home/ec2-user/votos_final.csv"
+echo "Worker2:"; ssh ec2-user@hadoop-worker2 "wc -l /home/ec2-user/votos_final.csv"
+echo "Worker3:"; ssh ec2-user@hadoop-worker3 "wc -l /home/ec2-user/votos_final.csv"
+```
+
+**Paso 4 — Juntar los 3 CSV en el master:**
+```bash
+mkdir -p /home/ec2-user/votos
+mkdir -p /home/ec2-user/votos_completos
+scp ec2-user@hadoop-worker1:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos1.csv
+scp ec2-user@hadoop-worker2:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos2.csv
+scp ec2-user@hadoop-worker3:/home/ec2-user/votos_final.csv /home/ec2-user/votos/votos3.csv
+
+head -1 /home/ec2-user/votos/votos1.csv > /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos1.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos2.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+tail -n +2 /home/ec2-user/votos/votos3.csv >> /home/ec2-user/votos_completos/votos_completo.csv
+wc -l /home/ec2-user/votos_completos/votos_completo.csv
+```
+
+**Paso 5 — Subir a HDFS:**
+
+Opción 1 — Archivos separados (MapReduce los procesa todos juntos):
+```bash
+hdfs dfs -mkdir -p /onpe/input_paralelo
+hdfs dfs -put /home/ec2-user/votos/votos1.csv /onpe/input_paralelo/
+hdfs dfs -put /home/ec2-user/votos/votos2.csv /onpe/input_paralelo/
+hdfs dfs -put /home/ec2-user/votos/votos3.csv /onpe/input_paralelo/
+```
+
+Opción 2 — Archivo completo:
+```bash
+hdfs dfs -mkdir -p /onpe/input_paralelo
+hdfs dfs -put /home/ec2-user/votos_completos/votos_completo.csv /onpe/input_paralelo/
+```
+
+**Paso 6 — Correr jobs MapReduce con datos paralelos:**
+```bash
+# Job nacional
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper.py,reducer.py \
+  -mapper "python3 mapper.py" \
+  -reducer "python3 reducer.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_nacional_paralelo
+
+# Job regional
+hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
+  -files mapper_region.py,reducer_region.py \
+  -mapper "python3 mapper_region.py" \
+  -reducer "python3 reducer_region.py" \
+  -input /onpe/input_paralelo/ \
+  -output /onpe/output_region_paralelo
+```
 
 ![Jobs MapReduce](screenshots/11_mapreduce_regional.png)
 
@@ -892,50 +974,33 @@ bd-elecciones-peru-2026/
 ## ▶️ Comandos de Referencia
 
 ```bash
-# Iniciar/detener cluster
-start-dfs.sh && start-yarn.sh
-stop-yarn.sh && stop-dfs.sh
+# ── CLUSTER ──────────────────────────────────────────
+start-dfs.sh && start-yarn.sh        # Iniciar
+stop-yarn.sh && stop-dfs.sh          # Detener
+hdfs dfsadmin -report                # Estado del cluster
+hdfs dfs -ls -h /onpe/               # Listar archivos HDFS
 
-# Estado del cluster
-hdfs dfsadmin -report
-
-# Listar archivos HDFS
-hdfs dfs -ls -h /onpe/
-
-# Ver resultados nacionales
+# ── CONSULTAS (datos finales) ─────────────────────────
 hdfs dfs -cat /onpe/output_nacional_final/part-00000 | sort -t$'\t' -k2 -rn
 
-# Consultar por región
 python3 scripts/consultas/consulta_region.py departamento 04
 python3 scripts/consultas/consulta_region.py provincia 0401
 python3 scripts/consultas/consulta_region.py distrito 040127
-
-# Consultar mesa específica
 python3 scripts/consultas/ver_mesa.py 007172
 
-# Descargar datos frescos
-nohup python3 scripts/ingesta/onpe_ingesta.py 1 92766 > ingesta.log 2>&1 &
-
-# Consultar por región con carpeta específica
+# ── CONSULTAS (datos paralelos) ───────────────────────
 python3 scripts/consultas/consulta_region.py departamento 04 /onpe/output_region_paralelo
 python3 scripts/consultas/consulta_region.py provincia 0401 /onpe/output_region_paralelo
 python3 scripts/consultas/consulta_region.py distrito 040127 /onpe/output_region_paralelo
 
-# Correr jobs con datos paralelos
-hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
-  -files mapper.py,reducer.py \
-  -mapper "python3 mapper.py" \
-  -reducer "python3 reducer.py" \
-  -input /onpe/input_paralelo/ \
-  -output /onpe/output_nacional_paralelo
+# ── DASHBOARD ────────────────────────────────────────
+nohup python3 dashboard/dashboard.py > dashboard.log 2>&1 &                                          # datos finales
+nohup python3 dashboard/dashboard.py /onpe/output_nacional_paralelo /onpe/output_region_paralelo > dashboard.log 2>&1 &  # datos paralelos
+kill $(ps aux | grep dashboard.py | grep -v grep | awk '{print $2}')                                 # detener
 
-hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
-  -files mapper_region.py,reducer_region.py \
-  -mapper "python3 mapper_region.py" \
-  -reducer "python3 reducer_region.py" \
-  -input /onpe/input_paralelo/ \
-  -output /onpe/output_region_paralelo
-
+# ── INGESTA ───────────────────────────────────────────
+nohup python3 scripts/ingesta/onpe_ingesta.py 1 92766 > ingesta.log 2>&1 &   # completa
+python3 scripts/ingesta/onpe_ingesta.py 1000 5000                             # rango específico
 ```
 
 ---
@@ -951,6 +1016,5 @@ hadoop jar /opt/hadoop/share/hadoop/tools/lib/hadoop-streaming-3.3.6.jar \
 
 ## 👥 Autores
 
-Universidad Nacional de San Agustín de Arequipa  
 Escuela Profesional de Ciencia de la Computación  
-Curso: BigData 2026A — Laboratorio 03
+Curso: BigData 2026A

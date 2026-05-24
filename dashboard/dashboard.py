@@ -3,10 +3,13 @@ import subprocess, sys
 sys.path.insert(0, '/home/ec2-user')
 from ubigeos import get_full, UBIGEOS
 
+import sys
+CARPETA_NACIONAL = sys.argv[1] if len(sys.argv) > 1 else "/onpe/output_nacional_final"
+CARPETA_REGION   = sys.argv[2] if len(sys.argv) > 2 else "/onpe/output_region_final"
 app = Flask(__name__)
 
 def leer_nacional():
-    result = subprocess.run(["hdfs","dfs","-cat","/onpe/output_nacional_final/part-00000"],capture_output=True,text=True)
+    result = subprocess.run(["hdfs","dfs","-cat",f"{CARPETA_NACIONAL}/part-00000"],capture_output=True,text=True)
     datos = []
     for line in result.stdout.strip().split('\n'):
         parts = line.split('\t')
@@ -16,7 +19,7 @@ def leer_nacional():
     return sorted(datos, key=lambda x: x['votos'], reverse=True)
 
 def leer_region(nivel, codigo):
-    result = subprocess.run(["hdfs","dfs","-cat","/onpe/output_region_final/part-00000"],capture_output=True,text=True)
+    result = subprocess.run(["hdfs","dfs","-cat",f"{CARPETA_REGION}/part-00000"],capture_output=True,text=True)
     votos = {}
     for line in result.stdout.strip().split('\n'):
         parts = line.split('\t')
